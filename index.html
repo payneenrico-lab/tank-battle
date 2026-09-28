@@ -293,7 +293,7 @@ const MOUNT = [];
 const LAVA = [];
 
 // ---------- state ----------
-const P = { x: 0, z: 0, a: 0, v: 0, cool: 0 };
+const P = { x: 0, z: 0, a: 0, v: 0, cool: 0, turnHeld: 0, turnDir: 0 };
 let E = [], S = [], FR = [], PT = [];
 let state = 'title', paused = false;
 let score = 0, lives = 3, hi = 0, nextBonus = 15000;
@@ -396,7 +396,7 @@ function getInput() {
   if (keys['arrowright'] || keys['d']) turn += 1;
   const jy = -joyV.y, jx = joyV.x;
   if (Math.abs(jy) > 0.22) fwd += Math.sign(jy) * (Math.abs(jy) - 0.22) / 0.78;
-  if (Math.abs(jx) > 0.18) turn += Math.sign(jx) * (Math.abs(jx) - 0.18) / 0.82;
+  if (Math.abs(jx) > 0.28) turn += Math.sign(jx) * ((Math.abs(jx) - 0.28) / 0.72) ** 2;
   return { fwd: clamp(fwd, -1, 1), turn: clamp(turn, -1, 1), fire: keys[' '] || fireHeld };
 }
 
@@ -573,7 +573,11 @@ function makeCracks() {
 function updatePlayer(dt, inp) {
   const target = inp.fwd > 0 ? inp.fwd * 32 : inp.fwd * 22;
   P.v += clamp(target - P.v, -70 * dt, 70 * dt);
-  P.a = wrapA(P.a + inp.turn * 1.15 * dt);
+  // Turning starts slow for fine aiming, ramps up while held, and stops dead on release (no drift).
+  if (inp.turn === 0 || Math.sign(inp.turn) !== P.turnDir) { P.turnHeld = 0; P.turnDir = Math.sign(inp.turn); }
+  else P.turnHeld += dt;
+  const turnRate = 0.28 + 0.62 * clamp(P.turnHeld / 0.8, 0, 1);
+  P.a = wrapA(P.a + inp.turn * turnRate * dt);
   P.cool -= dt;
   if (Math.abs(P.v) > 0.05) {
     const nx = mod(P.x + Math.sin(P.a) * P.v * dt), nz = mod(P.z + Math.cos(P.a) * P.v * dt);
@@ -585,7 +589,7 @@ function updatePlayer(dt, inp) {
   }
   if (inp.fire && P.cool <= 0 && !S.some(s => s.owner === 'p')) {
     fireShell('p', P.x, P.z, P.a, 3.9, PSPEED);
-    P.cool = 0.3; shake = Math.max(shake, 3); SFX.fire();
+    P.cool = 0.3; shake = Math.max(shake, 1.2); SFX.fire();
   }
   setEngine(true, P.v + (inp.turn ? 12 : 0));
 }
@@ -808,10 +812,17 @@ function model(m) {
   for (const [i, j] of m.e) seg(VT[i], VT[j]);
 }
 
+// Cheap phosphor glow: a wide faint stroke under a thin bright one (shadowBlur is far too slow for full-screen vectors)
+function glowStroke(color, w) {
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.18; ctx.lineWidth = w * 4; ctx.stroke();
+  ctx.globalAlpha = 0.35; ctx.lineWidth = w * 2.2; ctx.stroke();
+  ctx.globalAlpha = 1; ctx.lineWidth = w; ctx.stroke();
+}
+
 function drawPanorama() {
   const k = F / 560, lim = HF + 0.15;
   const sx = t => CX + Math.tan(t) * F;
-  ctx.beginPath();
   for (let i = 0; i < MOUNT.length; i++) {
     const p = MOUNT[i], q = MOUNT[(i + 1) % MOUNT.length];
     const ra = wrapA(p[0] - P.a), rb = wrapA(q[0] + (i === MOUNT.length - 1 ? TAU : 0) - P.a);
@@ -827,8 +838,10 @@ function drawPanorama() {
     ctx.arc(mx, my, r, -Math.PI / 2, Math.PI / 2, true);
     ctx.ellipse(mx, my, r * 0.45, r, 0, Math.PI / 2, -Math.PI / 2, false);
   }
-  ctx.stroke();
-  // lava
+}
+function drawLava() {
+  const k = F / 560, lim = HF + 0.15;
+  const sx = t => CX + Math.tan(t) * F;
   ctx.fillStyle = GREEN;
   for (const l of LAVA) {
     const r = wrapA(l.t - P.a);
@@ -841,11 +854,9 @@ function drawPanorama() {
 function drawWorld() {
   CA = Math.cos(P.a); SA = Math.sin(P.a);
   ctx.strokeStyle = GREEN; ctx.lineWidth = Math.max(1.2, 1.5 * SC); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-  ctx.shadowColor = GREEN; ctx.shadowBlur = 8 * SC;
-  // horizon
-  ctx.beginPath(); ctx.moveTo(0, HY); ctx.lineTo(W, HY); ctx.stroke();
+  // everything goes into one path, stroked once as a glow halo and once as a sharp core
+  ctx.beginPath(); ctx.moveTo(0, HY); ctx.lineTo(W, HY);
   drawPanorama();
-  ctx.beginPath();
   for (const o of OBS) if (setX(o.x, 0, o.z, o.yaw)) model(MODELS[o.type]);
   for (const e of E) {
     const yaw = e.type === 'saucer' ? (e.spin || 0) : e.a;
@@ -867,7 +878,8 @@ function drawWorld() {
     };
     r(f.a, A); r(f.b, B); seg(A, B);
   }
-  ctx.stroke();
+  glowStroke(GREEN, Math.max(1.2, 1.5 * SC));
+  drawLava();
   // particles
   ctx.fillStyle = GREEN;
   for (const p of PT) {
@@ -986,6 +998,7 @@ function drawCracks() {
   if (flash > 0) { ctx.fillStyle = `rgba(216,255,224,${flash * 0.5})`; ctx.fillRect(0, 0, W, H); }
 }
 
+let scanPat = null;
 function render() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.fillStyle = '#000402'; ctx.fillRect(0, 0, W, H);
@@ -997,8 +1010,12 @@ function render() {
   drawHUD();
   if (state === 'dying') drawCracks();
   // faint scanlines
-  ctx.fillStyle = 'rgba(0,0,0,0.18)';
-  for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+  if (!scanPat) {
+    const c = document.createElement('canvas'); c.width = 1; c.height = 3;
+    const g = c.getContext('2d'); g.fillStyle = 'rgba(0,0,0,0.18)'; g.fillRect(0, 0, 1, 1);
+    scanPat = ctx.createPattern(c, 'repeat');
+  }
+  ctx.fillStyle = scanPat; ctx.fillRect(0, 0, W, H);
   if (paused) { ctx.fillStyle = 'rgba(0,4,2,0.45)'; ctx.fillRect(0, 0, W, H); }
 }
 
